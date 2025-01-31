@@ -235,3 +235,64 @@
 ;; Read-only function to get campaign description
 (define-read-only (get-campaign-description (campaign-id uint))
   (map-get? campaign-descriptions { campaign-id: campaign-id }))
+
+;; Public function to add campaign milestone
+(define-public (add-campaign-milestone 
+    (campaign-id uint) 
+    (title (string-utf8 100))
+    (description (string-utf8 500))
+    (target-amount uint)
+    (deadline uint))
+    (let
+        (
+            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) (err err-not-found)))
+            (campaign-stat (default-to 
+                { unique-contributors: u0, avg-contribution: u0, largest-contribution: u0, updates-count: u0 }
+                (map-get? campaign-stats { campaign-id: campaign-id })))
+        )
+        ;; Verify caller is campaign owner
+        (asserts! (is-eq tx-sender (get owner campaign)) (err err-owner-only))
+        ;; Verify campaign is still active
+        (asserts! (< (current-time) (get deadline campaign)) (err err-deadline-passed))
+        
+        (ok (map-set campaign-milestones
+            { campaign-id: campaign-id, milestone-id: (get updates-count campaign-stat) }
+            {
+                title: title,
+                description: description,
+                target-amount: target-amount,
+                completed: false,
+                deadline: deadline
+            }))
+    )
+)
+
+;; Public function to post campaign update
+(define-public (post-campaign-update 
+    (campaign-id uint) 
+    (title (string-utf8 100))
+    (content (string-utf8 1000)))
+    (let
+        (
+            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) (err err-not-found)))
+            (current-stats (default-to { unique-contributors: u0, avg-contribution: u0, largest-contribution: u0, updates-count: u0 } 
+                (map-get? campaign-stats { campaign-id: campaign-id })))
+        )
+        ;; Verify caller is campaign owner
+        (asserts! (is-eq tx-sender (get owner campaign)) (err err-owner-only))
+        
+        ;; Add update
+        (map-set campaign-updates
+            { campaign-id: campaign-id, update-id: (get updates-count current-stats) }
+            {
+                title: title,
+                content: content,
+                timestamp: (current-time)
+            })
+        
+        ;; Update stats
+        (ok (map-set campaign-stats
+            { campaign-id: campaign-id }
+            (merge current-stats { updates-count: (+ (get updates-count current-stats) u1) })))
+    )
+)
