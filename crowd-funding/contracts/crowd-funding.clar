@@ -296,3 +296,44 @@
             (merge current-stats { updates-count: (+ (get updates-count current-stats) u1) })))
     )
 )
+
+
+;; Public function to report campaign
+(define-public (report-campaign 
+    (campaign-id uint) 
+    (reason (string-utf8 500)))
+    (let
+        (
+            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) (err err-not-found)))
+        )
+        ;; Check if already reported by this user
+        (asserts! (is-none (map-get? campaign-reports { campaign-id: campaign-id, reporter: tx-sender })) (err err-already-reported))
+        
+        (ok (map-set campaign-reports
+            { campaign-id: campaign-id, reporter: tx-sender }
+            {
+                reason: reason,
+                timestamp: (current-time),
+                status: "PENDING"
+            }))
+    )
+)
+
+;; Public function to update minimum contribution
+(define-public (update-minimum-contribution (new-minimum uint))
+    (begin
+        (asserts! (is-owner) (err err-owner-only))
+        (var-set minimum-contribution new-minimum)
+        (ok true)
+    )
+)
+
+;; Public function to update platform fee
+(define-public (update-platform-fee (new-fee uint))
+    (begin
+        (asserts! (is-owner) (err err-owner-only))
+        (asserts! (<= new-fee u1000) (err err-invalid-amount)) ;; Max 10%
+        (var-set platform-fee-percentage new-fee)
+        (ok true)
+    )
+)
