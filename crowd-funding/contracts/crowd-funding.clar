@@ -11,6 +11,56 @@
 (define-constant err-already-claimed (err u106))
 (define-constant  err-transfer-failed (err u107))
 
+;; Additional Constants
+(define-constant err-campaign-active (err u108))
+(define-constant err-minimum-contribution (err u109))
+(define-constant err-already-reported (err u110))
+(define-constant err-milestone-not-found (err u111))
+
+;; Additional Maps
+(define-map campaign-milestones
+    { campaign-id: uint, milestone-id: uint }
+    {
+        title: (string-utf8 100),
+        description: (string-utf8 500),
+        target-amount: uint,
+        completed: bool,
+        deadline: uint
+    }
+)
+
+(define-map campaign-updates
+    { campaign-id: uint, update-id: uint }
+    {
+        title: (string-utf8 100),
+        content: (string-utf8 1000),
+        timestamp: uint
+    }
+)
+
+(define-map campaign-reports
+    { campaign-id: uint, reporter: principal }
+    {
+        reason: (string-utf8 500),
+        timestamp: uint,
+        status: (string-ascii 20)
+    }
+)
+
+(define-map campaign-stats 
+    { campaign-id: uint }
+    {
+        unique-contributors: uint,
+        avg-contribution: uint,
+        largest-contribution: uint,
+        updates-count: uint
+    }
+)
+
+;; Data Variables for tracking
+(define-data-var minimum-contribution uint u1000000) ;; 1 STX
+(define-data-var platform-fee-percentage uint u25) ;; 0.25%
+
 ;; Data Maps
 (define-map campaigns
   { campaign-id: uint }
@@ -49,6 +99,22 @@
 
 (define-read-only (get-contribution (campaign-id uint) (contributor principal))
   (map-get? contributions { campaign-id: campaign-id, contributor: contributor }))
+
+;; Read-only function to get milestone details
+(define-read-only (get-milestone-details (campaign-id uint) (milestone-id uint))
+    (map-get? campaign-milestones { campaign-id: campaign-id, milestone-id: milestone-id })
+)
+
+;; Read-only function to get campaign stats
+(define-read-only (get-campaign-statistics (campaign-id uint))
+    (map-get? campaign-stats { campaign-id: campaign-id })
+)
+
+;; Read-only function to calculate platform fees
+(define-read-only (calculate-platform-fee (amount uint))
+    (/ (* amount (var-get platform-fee-percentage)) u10000)
+)
+
 
 ;; Public Functions
 (define-public (create-campaign (goal uint) (deadline uint))
@@ -169,3 +235,131 @@
 ;; Read-only function to get campaign description
 (define-read-only (get-campaign-description (campaign-id uint))
   (map-get? campaign-descriptions { campaign-id: campaign-id }))
+
+;; Public function to add campaign milestone
+(define-public (add-campaign-milestone 
+    (campaign-id uint) 
+    (title (string-utf8 100))
+    (description (string-utf8 500))
+    (target-amount uint)
+    (deadline uint))
+    (let
+        (
+            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) (err err-not-found)))
+            (campaign-stat (default-to 
+                { unique-contributors: u0, avg-contribution: u0, largest-contribution: u0, updates-count: u0 }
+                (map-get? campaign-stats { campaign-id: campaign-id })))
+        )
+        ;; Verify caller is campaign owner
+        (asserts! (is-eq tx-sender (get owner campaign)) (err err-owner-only))
+        ;; Verify campaign is still active
+        (asserts! (< (current-time) (get deadline campaign)) (err err-deadline-passed))
+        
+        (ok (map-set campaign-milestones
+            { campaign-id: campaign-id, milestone-id: (get updates-count campaign-stat) }
+            {
+                title: title,
+                description: description,
+                target-amount: target-amount,
+                completed: false,
+                deadline: deadline
+            }))
+    )
+)
+
+;; Public function to post campaign update
+(define-public (post-campaign-update 
+    (campaign-id uint) 
+    (title (string-utf8 100))
+    (content (string-utf8 1000)))
+    (let
+        (
+            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) (err err-not-found)))
+            (current-stats (default-to { unique-contributors: u0, avg-contribution: u0, largest-contribution: u0, updates-count: u0 } 
+                (map-get? campaign-stats { campaign-id: campaign-id })))
+        )
+        ;; Verify caller is campaign owner
+        (asserts! (is-eq tx-sender (get owner campaign)) (err err-owner-only))
+        
+        ;; Add update
+        (map-set campaign-updates
+            { campaign-id: campaign-id, update-id: (get updates-count current-stats) }
+            {
+                title: title,
+                content: content,
+                timestamp: (current-time)
+            })
+        
+        ;; Update stats
+        (ok (map-set campaign-stats
+            { campaign-id: campaign-id }
+            (merge current-stats { updates-count: (+ (get updates-count current-stats) u1) })))
+    )
+)
+
+
+;; Public function to report campaign
+(define-public (report-campaign 
+    (campaign-id uint) 
+    (reason (string-utf8 500)))
+    (let
+        (
+            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) (err err-not-found)))
+        )
+        ;; Check if already reported by this user
+        (asserts! (is-none (map-get? campaign-reports { campaign-id: campaign-id, reporter: tx-sender })) (err err-already-reported))
+        
+        (ok (map-set campaign-reports
+            { campaign-id: campaign-id, reporter: tx-sender }
+            {
+                reason: reason,
+                timestamp: (current-time),
+                status: "PENDING"
+            }))
+    )
+)
+
+;; Public function to update minimum contribution
+(define-public (update-minimum-contribution (new-minimum uint))
+    (begin
+        (asserts! (is-owner) (err err-owner-only))
+        (var-set minimum-contribution new-minimum)
+        (ok true)
+    )
+)
+
+;; Public function to update platform fee
+(define-public (update-platform-fee (new-fee uint))
+    (begin
+        (asserts! (is-owner) (err err-owner-only))
+        (asserts! (<= new-fee u1000) (err err-invalid-amount)) ;; Max 10%
+        (var-set platform-fee-percentage new-fee)
+        (ok true)
+    )
+)
+
+
+;; Read-only function to get campaign update
+(define-read-only (get-campaign-update (campaign-id uint) (update-id uint))
+    (map-get? campaign-updates { campaign-id: campaign-id, update-id: update-id })
+)
+
+;; Read-only function to get campaign report status
+(define-read-only (get-campaign-report-status (campaign-id uint) (reporter principal))
+    (map-get? campaign-reports { campaign-id: campaign-id, reporter: reporter })
+)
+
+;; Public function to mark milestone as completed
+(define-public (complete-milestone (campaign-id uint) (milestone-id uint))
+    (let
+        (
+            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) (err err-not-found)))
+            (milestone (unwrap! (map-get? campaign-milestones { campaign-id: campaign-id, milestone-id: milestone-id }) (err err-milestone-not-found)))
+        )
+        (asserts! (is-eq tx-sender (get owner campaign)) (err err-owner-only))
+        
+        (ok (map-set campaign-milestones
+            { campaign-id: campaign-id, milestone-id: milestone-id }
+            (merge milestone { completed: true })))
+    )
+)
